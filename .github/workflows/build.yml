@@ -1,24 +1,60 @@
-name: Build Android APK
+name: Build APK Manually
 on:
   push:
     branches: [ main ]
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
+
     steps:
-      # Updated to v4 to fix the crash
+      # 1. Get your code
       - uses: actions/checkout@v4
 
-      # This is the main builder
-      - name: Build with Buildozer
-        uses: ArtemSBulgakov/buildozer-action-v1@v3
-        id: buildozer
+      # 2. Install Java (Required for Android)
+      - name: Set up Java
+        uses: actions/setup-java@v4
         with:
-          workdir: .
-          buildozer_version: master
+          distribution: 'temurin'
+          java-version: '17'
 
-      # Updated to v4 to fix the crash
+      # 3. Install Python
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      # 4. Install the necessary Linux tools (The Manual Fix)
+      - name: Install Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            git \
+            ffmpeg \
+            libsdl2-dev \
+            libsdl2-image-dev \
+            libsdl2-mixer-dev \
+            libsdl2-ttf-dev \
+            libportmidi-dev \
+            libswscale-dev \
+            libavformat-dev \
+            libavcodec-dev \
+            zlib1g-dev \
+            libtool \
+            automake \
+            autoconf \
+            libltdl-dev
+
+      # 5. Install Buildozer
+      - name: Install Buildozer
+        run: pip install buildozer cython==0.29.33
+
+      # 6. Build the App
+      - name: Build APK
+        run: yes | buildozer android debug
+
+      # 7. Upload the result
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
