@@ -1,0 +1,25 @@
+name: CI
+on:
+  push:
+    branches: [ main ]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v2
+
+      # This runs Buildozer to create the APK
+      - name: Build with Buildozer
+        uses: ArtemSBulgakov/buildozer-action-v1@v3
+        id: buildozer
+        with:
+          workdir: .
+          buildozer_version: master
+
+      # This uploads the APK to the "Artifacts" section
+      - name: Upload APK
+        uses: actions/upload-artifact@v2
+        with:
+          name: package
+          path: bin/*.apk
