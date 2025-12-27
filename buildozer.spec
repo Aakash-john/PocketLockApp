@@ -1,19 +1,21 @@
 [app]
-title = Pocket Lock
-package.name = pocketlock
+title = Poppy Float
+package.name = poppyfloat
 package.domain = org.test
 source.dir = .
 source.include_exts = py,png,jpg,kv,atlas
-version = 0.1
+version = 1.0
 requirements = python3,kivy,jnius
 
-# Permissions for Sound and Vibration
-android.permissions = INTERNET,VIBRATE,MODIFY_AUDIO_SETTINGS,ACCESS_NOTIFICATION_POLICY
+# --- PERMISSIONS ---
+# SYSTEM_ALERT_WINDOW is what allows floating over other apps
+android.permissions = INTERNET,VIBRATE,MODIFY_AUDIO_SETTINGS,ACCESS_NOTIFICATION_POLICY,SYSTEM_ALERT_WINDOW
 
+# --- DISPLAY SETTINGS ---
+# These flags help with transparency
+android.meta_data = android.app.background_running=true
+fullscreen = 0
 orientation = portrait
-fullscreen = 1
-android.archs = arm64-v8a, armeabi-v7a
-android.allow_backup = True
 
 [buildozer]
 log_level = 2
