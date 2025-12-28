@@ -1,151 +1,166 @@
-# New build trigger
-import math
 from kivy.app import App
-from kivy.uix.widget import Widget
+from kivy.core.window import Window
+from kivy.uix.boxlayout import BoxLayout
+from kivy.uix.floatlayout import FloatLayout
 from kivy.uix.button import Button
 from kivy.uix.label import Label
-from kivy.uix.floatlayout import FloatLayout
-from kivy.uix.boxlayout import BoxLayout
-from kivy.uix.gridlayout import GridLayout
-from kivy.uix.textinput import TextInput
+from kivy.uix.widget import Widget
 from kivy.uix.switch import Switch
-from kivy.uix.slider import Slider
-from kivy.uix.popup import Popup
-from kivy.uix.scrollview import ScrollView
-from kivy.core.window import Window
-from kivy.animation import Animation
-from kivy.graphics import Color, RoundedRectangle, Ellipse, Line
+from kivy.uix.textinput import TextInput
 from kivy.clock import Clock
+from kivy.graphics import Color, RoundedRectangle, Rectangle
 from kivy.metrics import dp
-from kivy.properties import NumericProperty, StringProperty, BooleanProperty
 from datetime import datetime
-from jnius import autoclass
+from jnius import autoclass, cast
 
-# --- ANDROID INTEGRATION ---
+# --- ANDROID IMPORTS ---
 try:
+    # Android System classes to handle Notifications and Audio
     PythonActivity = autoclass('org.kivy.android.PythonActivity')
     Context = autoclass('android.content.Context')
+    Intent = autoclass('android.content.Intent')
+    PendingIntent = autoclass('android.app.PendingIntent')
+    NotificationBuilder = autoclass('android.app.Notification$Builder')
+    NotificationManager = autoclass('android.app.NotificationManager')
+    NotificationChannel = autoclass('android.app.NotificationChannel')
     AudioManager = autoclass('android.media.AudioManager')
+    
     activity = PythonActivity.mActivity
+    context = activity.getApplicationContext()
+    notification_service = activity.getSystemService(Context.NOTIFICATION_SERVICE)
     audio_manager = activity.getSystemService(Context.AUDIO_SERVICE)
 except:
+    # Fallback for testing on PC
     audio_manager = None
+    notification_service = None
 
-# --- GLOBAL SETTINGS ---
+# --- GLOBAL VARIABLES ---
 class AppState:
-    brightness = 0.5
-    start_time = 22
-    end_time = 7
+    brightness_level = 0.0  # 0.0 = Clear, 0.95 = Dark
+    is_locked = False
+    
+    # Scheduler Settings
     auto_sound = False
+    time_start = 22
+    time_end = 7
 
 state = AppState()
 
-# --- CUSTOM "POPPY" BUTTON ---
-class PoppyButton(Button):
-    def __init__(self, bg_color=(1, 1, 1, 1), icon_text="", **kwargs):
-        super().__init__(**kwargs)
-        self.background_color = (0,0,0,0)
-        self.background_normal = ''
-        self.text = icon_text
-        self.bg_color_data = bg_color
-        self.font_size = '20sp'
-        self.bold = True
-        with self.canvas.before:
-            Color(*self.bg_color_data)
-            self.shape = RoundedRectangle(pos=self.pos, size=self.size, radius=[50])
-        self.bind(pos=self.update_shape, size=self.update_shape)
+# --- HELPER: CREATE NOTIFICATION ---
+def create_notification():
+    if not notification_service: return
 
-    def update_shape(self, *args):
-        self.shape.pos = self.pos
-        self.shape.size = self.size
-        self.shape.radius = [self.size[0]/2]
+    channel_id = "pocket_lock_channel"
+    title = "Pocket Lock Active"
+    message = "Tap here to open Controls (Lock/Screen Off)"
+    
+    # 1. Create Channel (Required for Android 8+)
+    importance = NotificationManager.IMPORTANCE_LOW
+    channel = NotificationChannel(channel_id, "Pocket Lock Controls", importance)
+    notification_service.createNotificationChannel(channel)
+    
+    # 2. Setup the "Tap" Action (Resumes the App)
+    intent = Intent(context, PythonActivity)
+    intent.setFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP)
+    # flag immutable is required for newer android
+    pending_intent = PendingIntent.getActivity(context, 0, intent, PendingIntent.FLAG_IMMUTABLE)
+    
+    # 3. Build Notification
+    builder = NotificationBuilder(context, channel_id)
+    builder.setContentTitle(title)
+    builder.setContentText(message)
+    builder.setSmallIcon(context.getApplicationInfo().icon)
+    builder.setContentIntent(pending_intent)
+    builder.setAutoCancel(False) # Keep it there
+    builder.setOngoing(True)     # Make it hard to swipe away
+    
+    # 4. Show it
+    notification_service.notify(1, builder.build())
 
 # --- FEATURE 1: TOUCH LOCK OVERLAY ---
-class TouchLockOverlay(FloatLayout):
-    def __init__(self, close_callback, **kwargs):
+class TouchLockMode(FloatLayout):
+    def __init__(self, unlock_callback, **kwargs):
         super().__init__(**kwargs)
-        # Transparent background
+        
+        # Transparent background that catches touches
         with self.canvas.before:
-            Color(0, 0, 0, 0.01) # Almost transparent to catch touches
-            self.bg = RoundedRectangle(pos=self.pos, size=self.size)
+            Color(0, 0, 0, 0.01)
+            self.bg = Rectangle(pos=self.pos, size=self.size)
         self.bind(pos=self.update_rect, size=self.update_rect)
-        self.close_callback = close_callback
+        self.unlock_callback = unlock_callback
 
-        # 1. Brightness Down (Left)
-        self.btn_minus = PoppyButton(
-            bg_color=(1, 0.2, 0.2, 0.5), # Red tint transparent
-            icon_text="-",
-            size_hint=(None, None), size=(dp(50), dp(50)),
-            pos_hint={'center_y': 0.5, 'x': 0.1}
-        )
-        self.btn_minus.bind(on_press=self.dim_screen)
-        self.add_widget(self.btn_minus)
+        # 1. Brightness Controls (Left/Right)
+        self.add_widget(self.create_round_btn("-", 0.1, 0.5, self.dim))
+        self.add_widget(self.create_round_btn("+", 0.9, 0.5, self.brighten))
 
-        # 2. Brightness Up (Right)
-        self.btn_plus = PoppyButton(
-            bg_color=(0.2, 1, 0.2, 0.5), # Green tint transparent
-            icon_text="+",
-            size_hint=(None, None), size=(dp(50), dp(50)),
-            pos_hint={'center_y': 0.5, 'right': 0.9}
-        )
-        self.btn_plus.bind(on_press=self.brighten_screen)
-        self.add_widget(self.btn_plus)
-
-        # 3. The Lock (Center Square) - DRAG TO UNLOCK
+        # 2. Center Lock (Draggable)
         self.lock_btn = Button(
+            text="🔒", font_size='40sp',
             background_color=(0,0,0,0),
-            text="🔒", font_size='30sp',
-            size_hint=(None, None), size=(dp(70), dp(70)),
+            size_hint=(None, None), size=(dp(80), dp(80)),
             pos_hint={'center_x': 0.5, 'center_y': 0.5}
         )
         with self.lock_btn.canvas.before:
-            Color(0.2, 0.8, 1, 0.6) # Cyan transparent
-            self.lock_shape = RoundedRectangle(pos=self.lock_btn.pos, size=self.lock_btn.size, radius=[10])
+            Color(0, 1, 1, 0.5) # Cyan
+            self.lock_shape = RoundedRectangle(pos=self.lock_btn.pos, size=self.lock_btn.size, radius=[20])
         
-        self.lock_btn.bind(pos=self.update_lock_shape, size=self.update_lock_shape)
+        self.lock_btn.bind(pos=self.update_lock, size=self.update_lock)
         self.lock_btn.bind(on_touch_move=self.on_drag_lock)
         self.add_widget(self.lock_btn)
+        
+        # Instruction Label
+        self.add_widget(Label(
+            text="Drag Lock to Edge to Unlock", 
+            pos_hint={'center_x': 0.5, 'center_y': 0.4},
+            color=(1,1,1,0.5)
+        ))
+
+    def create_round_btn(self, txt, x_pos, y_pos, func):
+        btn = Button(
+            text=txt, font_size='30sp', bold=True,
+            background_color=(0,0,0,0),
+            size_hint=(None, None), size=(dp(60), dp(60)),
+            pos_hint={'center_x': x_pos, 'center_y': y_pos}
+        )
+        with btn.canvas.before:
+            Color(1, 1, 1, 0.3)
+            RoundedRectangle(pos=btn.pos, size=btn.size, radius=[30])
+        btn.bind(on_press=func)
+        return btn
 
     def update_rect(self, *args):
         self.bg.pos = self.pos
         self.bg.size = self.size
-
-    def update_lock_shape(self, *args):
+    def update_lock(self, *args):
         self.lock_shape.pos = self.lock_btn.pos
         self.lock_shape.size = self.lock_btn.size
 
-    def dim_screen(self, instance):
-        if state.brightness > 0.1: state.brightness -= 0.1
-        # Simulating brightness change using opacity of a global black layer would be better in Kivy
-        # but here we just update state for now.
-
-    def brighten_screen(self, instance):
-        if state.brightness < 1.0: state.brightness += 0.1
+    def dim(self, i): 
+        if state.brightness_level < 0.9: state.brightness_level += 0.1
+    def brighten(self, i): 
+        if state.brightness_level > 0.1: state.brightness_level -= 0.1
 
     def on_touch_down(self, touch):
-        # Consume ALL touches
-        super().on_touch_down(touch)
-        return True 
+        return True # Block all touches
 
     def on_drag_lock(self, instance, touch):
-        # Calculate distance dragged from center
+        # Calculate distance from center
         cx, cy = Window.width / 2, Window.height / 2
+        import math
         dist = math.sqrt((touch.x - cx)**2 + (touch.y - cy)**2)
-        
-        # If dragged more than 150 pixels, Unlock!
-        if dist > 150:
-            self.close_callback()
+        if dist > 200: # Dragged far enough
+            self.unlock_callback()
 
-# --- FEATURE 2: FAKE POWER OFF (Blackout) ---
+# --- FEATURE 2: BLACKOUT MODE ---
 class BlackoutMode(Widget):
     def __init__(self, unlock_callback, **kwargs):
         super().__init__(**kwargs)
-        with self.canvas:
-            Color(0, 0, 0, 1) # Pitch Black
-            self.rect = RoundedRectangle(pos=self.pos, size=self.size)
-        self.bind(pos=self.update, size=self.update)
         self.unlock_callback = unlock_callback
         self.taps = 0
+        with self.canvas:
+            Color(0, 0, 0, 1) # Pure Black
+            self.rect = Rectangle(pos=self.pos, size=self.size)
+        self.bind(pos=self.update, size=self.update)
 
     def update(self, *args):
         self.rect.pos = self.pos
@@ -153,179 +168,138 @@ class BlackoutMode(Widget):
 
     def on_touch_down(self, touch):
         self.taps += 1
-        if self.taps >= 3: # Triple tap to wake
-            self.unlock_callback()
+        if self.taps >= 3: self.unlock_callback()
         return True
 
-# --- SETTINGS POPUP ---
-class SettingsPopup(Popup):
+# --- MAIN APP LAYOUT ---
+class MainUI(FloatLayout):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
-        self.title = "App Customization"
-        self.size_hint = (0.9, 0.8)
-        self.background_color = (0.1, 0.1, 0.1, 1)
-
-        scroll = ScrollView()
-        content = BoxLayout(orientation='vertical', padding=20, spacing=20, size_hint_y=None)
-        content.bind(minimum_height=content.setter('height'))
-
-        # Sound Scheduler Section
-        content.add_widget(Label(text="[b]Time-Based Sound Profile[/b]", markup=True, size_hint_y=None, height=40))
         
-        row_sw = BoxLayout(size_hint_y=None, height=40)
-        row_sw.add_widget(Label(text="Enable Auto-Schedule:"))
-        sw = Switch(active=state.auto_sound)
-        sw.bind(active=self.toggle_sound)
-        row_sw.add_widget(sw)
-        content.add_widget(row_sw)
+        # 1. Background Dimmer (Global)
+        with self.canvas:
+            self.dim_color = Color(0, 0, 0, 0)
+            self.dim_rect = Rectangle(pos=self.pos, size=self.size)
+        self.bind(pos=self.update_dim, size=self.update_dim)
+        Clock.schedule_interval(self.check_state, 0.1)
 
-        row_time = GridLayout(cols=4, size_hint_y=None, height=40, spacing=5)
-        row_time.add_widget(Label(text="Silent Start:"))
-        self.t_start = TextInput(text=str(state.start_time), input_filter='int', multiline=False)
-        row_time.add_widget(self.t_start)
-        row_time.add_widget(Label(text="Silent End:"))
-        self.t_end = TextInput(text=str(state.end_time), input_filter='int', multiline=False)
-        row_time.add_widget(self.t_end)
-        content.add_widget(row_time)
+        # 2. Dashboard (Visible initially)
+        self.dashboard = BoxLayout(orientation='vertical', padding=20, spacing=20)
+        self.setup_dashboard()
+        self.add_widget(self.dashboard)
+        
+        # 3. Overlays (Initially None)
+        self.current_overlay = None
 
-        # Style Section
-        content.add_widget(Label(text="[b]Visual Settings[/b]", markup=True, size_hint_y=None, height=40))
-        content.add_widget(Label(text="(Theme colors are auto-generated for poppy look)", font_size='12sp', size_hint_y=None, height=20))
+    def setup_dashboard(self):
+        # Title
+        self.dashboard.add_widget(Label(text="[b]POCKET LOCK[/b]", markup=True, font_size='24sp', size_hint_y=None, height=50))
+        
+        # Notification Button
+        btn_notif = Button(text="1. Activate Notification Bar", background_color=(0, 1, 0, 1))
+        btn_notif.bind(on_press=self.start_service)
+        self.dashboard.add_widget(btn_notif)
+        
+        # Controls (Poppy Style)
+        lbl = Label(text="Direct Controls:", size_hint_y=None, height=30)
+        self.dashboard.add_widget(lbl)
+        
+        grid = BoxLayout(spacing=10, size_hint_y=None, height=100)
+        
+        # Lock Button
+        btn_lock = Button(text="Lock\nTouch", background_color=(1, 1, 0, 1), color=(0,0,0,1))
+        btn_lock.bind(on_press=self.activate_lock)
+        grid.add_widget(btn_lock)
+        
+        # Blackout Button
+        btn_off = Button(text="Screen\nOff", background_color=(1, 0, 1, 1))
+        btn_off.bind(on_press=self.activate_blackout)
+        grid.add_widget(btn_off)
+        
+        self.dashboard.add_widget(grid)
+        
+        # Scheduler Inputs
+        self.dashboard.add_widget(Label(text="Auto-Vibrate (Start Hr - End Hr):"))
+        row = BoxLayout(size_hint_y=None, height=40)
+        self.inp_start = TextInput(text="22", input_filter='int')
+        self.inp_end = TextInput(text="7", input_filter='int')
+        row.add_widget(self.inp_start)
+        row.add_widget(self.inp_end)
+        self.dashboard.add_widget(row)
+        
+        # Save Scheduler
+        btn_sched = Button(text="Enable Schedule", size_hint_y=None, height=50)
+        btn_sched.bind(on_press=self.toggle_schedule)
+        self.dashboard.add_widget(btn_sched)
 
-        scroll.add_widget(content)
-        self.content = scroll
+    def update_dim(self, *args):
+        self.dim_rect.pos = self.pos
+        self.dim_rect.size = self.size
 
-    def toggle_sound(self, instance, value):
-        state.auto_sound = value
+    def check_state(self, dt):
+        # Update Brightness Overlay
+        self.dim_color.a = state.brightness_level
+        
+        # Check Sound Scheduler
+        if state.auto_sound and audio_manager:
+            now = datetime.now().hour
+            s, e = state.time_start, state.time_end
+            is_quiet = False
+            if s < e:
+                if s <= now < e: is_quiet = True
+            else:
+                if now >= s or now < e: is_quiet = True
+            
+            mode = audio_manager.getRingerMode()
+            if is_quiet and mode == 2: audio_manager.setRingerMode(1)
+            elif not is_quiet and mode == 1: audio_manager.setRingerMode(2)
+
+    def start_service(self, instance):
+        create_notification()
+        instance.text = "Notification Active! (Check Bar)"
+        # Minimize app so user can see notification works
+        # activity.moveTaskToBack(True) 
+
+    def activate_lock(self, instance):
+        self.dashboard.opacity = 0 # Hide dashboard
+        self.dashboard.disabled = True
+        self.current_overlay = TouchLockMode(self.restore_dashboard)
+        self.add_widget(self.current_overlay)
+
+    def activate_blackout(self, instance):
+        self.dashboard.opacity = 0
+        self.dashboard.disabled = True
+        self.current_overlay = BlackoutMode(self.restore_dashboard)
+        self.add_widget(self.current_overlay)
+
+    def restore_dashboard(self):
+        if self.current_overlay:
+            self.remove_widget(self.current_overlay)
+            self.current_overlay = None
+        state.brightness_level = 0.0
+        self.dashboard.opacity = 1
+        self.dashboard.disabled = False
+
+    def toggle_schedule(self, instance):
+        state.auto_sound = not state.auto_sound
         try:
-            state.start_time = int(self.t_start.text)
-            state.end_time = int(self.t_end.text)
-        except: pass
+            state.time_start = int(self.inp_start.text)
+            state.time_end = int(self.inp_end.text)
+            instance.text = "Schedule: ON" if state.auto_sound else "Schedule: OFF"
+        except:
+            instance.text = "Error in Time"
 
-# --- MAIN FLOATING INTERFACE ---
-class MainInterface(FloatLayout):
-    def __init__(self, **kwargs):
-        super().__init__(**kwargs)
-        self.menu_open = False
-        
-        # 1. THE MAIN FLOATING BUBBLE (Cyan)
-        self.main_btn = PoppyButton(
-            bg_color=(0, 1, 1, 1), # Cyan
-            icon_text="M",
-            size_hint=(None, None), size=(dp(60), dp(60)),
-            pos_hint={'right': 0.95, 'center_y': 0.5}
-        )
-        self.main_btn.bind(on_press=self.toggle_menu)
-        self.add_widget(self.main_btn)
-
-        # 2. FEATURE BUBBLES (Initially Hidden inside Main Bubble)
-        # Feature 1: Touch Lock (Yellow)
-        self.feat_1 = PoppyButton(
-            bg_color=(1, 1, 0, 1), 
-            icon_text="🔒",
-            size_hint=(None, None), size=(0, 0), opacity=0,
-            pos_hint={'center_x': 0.5, 'center_y': 0.5} # Placeholder
-        )
-        self.feat_1.bind(on_press=self.activate_touch_lock)
-        self.add_widget(self.feat_1)
-
-        # Feature 2: Screen Off (Magenta)
-        self.feat_2 = PoppyButton(
-            bg_color=(1, 0, 1, 1), 
-            icon_text="⚡",
-            size_hint=(None, None), size=(0, 0), opacity=0,
-            pos_hint={'center_x': 0.5, 'center_y': 0.5}
-        )
-        self.feat_2.bind(on_press=self.activate_power_off)
-        self.add_widget(self.feat_2)
-
-        # Feature 3: Settings (Green)
-        self.feat_3 = PoppyButton(
-            bg_color=(0.3, 1, 0.3, 1), 
-            icon_text="⚙",
-            size_hint=(None, None), size=(0, 0), opacity=0,
-            pos_hint={'center_x': 0.5, 'center_y': 0.5}
-        )
-        self.feat_3.bind(on_press=self.open_settings)
-        self.add_widget(self.feat_3)
-
-        # Ensure main button is on top
-        self.remove_widget(self.main_btn)
-        self.add_widget(self.main_btn)
-
-    def toggle_menu(self, instance):
-        self.menu_open = not self.menu_open
-        
-        # Animation Target Properties
-        if self.menu_open:
-            self.main_btn.text = "X"
-            main_angle = -90
-            
-            # Fan out to the left
-            # Positions relative to the main button (Window width based)
-            anim_1 = Animation(size=(dp(50), dp(50)), opacity=1, pos=(self.main_btn.x - dp(70), self.main_btn.y + dp(60)), t='out_elastic', duration=0.5)
-            anim_2 = Animation(size=(dp(50), dp(50)), opacity=1, pos=(self.main_btn.x - dp(90), self.main_btn.y), t='out_elastic', duration=0.6)
-            anim_3 = Animation(size=(dp(50), dp(50)), opacity=1, pos=(self.main_btn.x - dp(70), self.main_btn.y - dp(60)), t='out_elastic', duration=0.7)
-        else:
-            self.main_btn.text = "M"
-            main_angle = 0
-            
-            # Suck back into main button
-            center_x, center_y = self.main_btn.pos
-            anim_1 = Animation(size=(0, 0), opacity=0, pos=self.main_btn.pos, duration=0.3)
-            anim_2 = Animation(size=(0, 0), opacity=0, pos=self.main_btn.pos, duration=0.3)
-            anim_3 = Animation(size=(0, 0), opacity=0, pos=self.main_btn.pos, duration=0.3)
-
-        # Rotate Main Button
-        anim_main = Animation(angle=main_angle, duration=0.3)
-        
-        anim_1.start(self.feat_1)
-        anim_2.start(self.feat_2)
-        anim_3.start(self.feat_3)
-
-    def activate_touch_lock(self, instance):
-        self.toggle_menu(None) # Close menu
-        self.overlay = TouchLockOverlay(self.deactivate_touch_lock)
-        Window.add_widget(self.overlay)
-
-    def deactivate_touch_lock(self):
-        Window.remove_widget(self.overlay)
-
-    def activate_power_off(self, instance):
-        self.toggle_menu(None)
-        self.blackout = BlackoutMode(self.deactivate_power_off)
-        Window.add_widget(self.blackout)
-
-    def deactivate_power_off(self):
-        Window.remove_widget(self.blackout)
-
-    def open_settings(self, instance):
-        self.toggle_menu(None)
-        pop = SettingsPopup()
-        pop.open()
-
-class FloatingApp(App):
+class PocketApp(App):
     def build(self):
-        Window.clearcolor = (0, 0, 0, 0) # Transparent background
-        # Note: On Android, specific flags in buildozer are needed to make this truly see-through
-        Clock.schedule_interval(self.scheduler_check, 10)
-        return MainInterface()
-
-    def scheduler_check(self, dt):
-        if not state.auto_sound or not audio_manager: return
-        now = datetime.now().hour
-        start, end = state.start_time, state.end_time
-        
-        # Range Logic
-        is_quiet = False
-        if start < end:
-            if start <= now < end: is_quiet = True
-        else:
-            if now >= start or now < end: is_quiet = True
-            
-        current = audio_manager.getRingerMode()
-        if is_quiet and current == 2: audio_manager.setRingerMode(1) # Vibrate
-        elif not is_quiet and current == 1: audio_manager.setRingerMode(2) # Normal
+        # Transparent Background Support
+        Window.clearcolor = (0, 0, 0, 0)
+        return MainUI()
+    
+    def on_pause(self):
+        return True # Don't kill app when minimized
+    
+    def on_resume(self):
+        pass
 
 if __name__ == '__main__':
-    FloatingApp().run()
+    PocketApp().run()
